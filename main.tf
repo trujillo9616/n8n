@@ -84,6 +84,11 @@ resource "digitalocean_ssh_key" "n8n_key" {
   public_key = var.ssh_public_key
 }
 
+# Create DNS zone in DigitalOcean
+resource "digitalocean_domain" "truji_dev" {
+  name = "truji.dev"
+}
+
 # Droplet
 resource "digitalocean_droplet" "n8n_server" {
   image    = "ubuntu-24-04-x64"
@@ -96,7 +101,7 @@ resource "digitalocean_droplet" "n8n_server" {
     postgres_password       = var.postgres_password
     n8n_basic_auth_user    = var.n8n_basic_auth_user
     n8n_basic_auth_password = var.n8n_basic_auth_password
-    domain_name            = var.domain_name != "" ? var.domain_name : digitalocean_droplet.n8n_server.ipv4_address
+    domain_name            = var.domain_name
     ssh_public_key         = var.ssh_public_key
   })
 
@@ -105,6 +110,33 @@ resource "digitalocean_droplet" "n8n_server" {
   lifecycle {
     prevent_destroy = false
   }
+}
+
+# A record for N8N subdomain
+resource "digitalocean_record" "n8n" {
+  domain = digitalocean_domain.truji_dev.name
+  type   = "A"
+  name   = "n8n"
+  value  = digitalocean_droplet.n8n_server.ipv4_address
+  ttl    = 300
+}
+
+# Optional: Root domain A record (points to same server)
+resource "digitalocean_record" "root" {
+  domain = digitalocean_domain.truji_dev.name
+  type   = "A"
+  name   = "@"
+  value  = digitalocean_droplet.n8n_server.ipv4_address
+  ttl    = 300
+}
+
+# Optional: WWW subdomain (CNAME to root)
+resource "digitalocean_record" "www" {
+  domain = digitalocean_domain.truji_dev.name
+  type   = "CNAME"
+  name   = "www"
+  value  = "truji.dev."
+  ttl    = 300
 }
 
 # Firewall
@@ -153,44 +185,6 @@ resource "digitalocean_firewall" "n8n_firewall" {
   }
 }
 
-# Reference to existing bucket (not creating it)
-data "digitalocean_spaces_bucket" "terraform_state" {
-  name   = "truji"
-  region = var.region
-}
-
-# Create DNS zone in DigitalOcean
-resource "digitalocean_domain" "truji_dev" {
-  name = "truji.dev"
-}
-
-# A record for N8N subdomain
-resource "digitalocean_record" "n8n" {
-  domain = digitalocean_domain.truji_dev.name
-  type   = "A"
-  name   = "n8n"
-  value  = digitalocean_droplet.n8n_server.ipv4_address
-  ttl    = 300
-}
-
-# Optional: Root domain A record (points to same server)
-resource "digitalocean_record" "root" {
-  domain = digitalocean_domain.truji_dev.name
-  type   = "A"
-  name   = "@"
-  value  = digitalocean_droplet.n8n_server.ipv4_address
-  ttl    = 300
-}
-
-# Optional: WWW subdomain (CNAME to root)
-resource "digitalocean_record" "www" {
-  domain = digitalocean_domain.truji_dev.name
-  type   = "CNAME"
-  name   = "www"
-  value  = "truji.dev."
-  ttl    = 300
-}
-
 # Outputs
 output "server_ip" {
   description = "Public IP address of the n8n server"
@@ -236,13 +230,5 @@ output "dns_records_created" {
     n8n_subdomain = digitalocean_record.n8n.fqdn
     root_domain   = digitalocean_record.root.fqdn
     www_subdomain = digitalocean_record.www.fqdn
-  }
-}
-
-output "state_bucket_info" {
-  description = "Terraform state storage bucket info"
-  value = {
-    name     = data.digitalocean_spaces_bucket.terraform_state.name
-    endpoint = data.digitalocean_spaces_bucket.terraform_state.bucket_domain_name
   }
 }
