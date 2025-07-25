@@ -18,7 +18,7 @@ on:
         - apply
         - destroy
       confirm_destroy:
-        description: 'Type "destroy" to confirm destruction'
+        description: 'Type "destroy" to confirm destruction (owner only)'
         required: false
         type: string
 
@@ -56,11 +56,23 @@ jobs:
     - name: Validate Destroy Confirmation
       if: github.event.inputs.action == 'destroy'
       run: |
+        # Check 1: Exact confirmation text
         if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
           echo "❌ Destroy confirmation failed. You must type 'destroy' to confirm."
           exit 1
         fi
-        echo "✅ Destroy confirmation validated"
+        
+        # Check 2: Only repository owner can destroy
+        if [ "${{ github.actor }}" != "${{ github.repository_owner }}" ]; then
+          echo "❌ Only the repository owner can destroy infrastructure."
+          echo "Current user: ${{ github.actor }}"
+          echo "Repository owner: ${{ github.repository_owner }}"
+          exit 1
+        fi
+        
+        echo "✅ All destroy confirmations validated"
+        echo "🚨 Proceeding with infrastructure destruction in 10 seconds..."
+        sleep 10
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
