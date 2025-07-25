@@ -1,1 +1,42 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+
+# SENSITIVE FILES - NEVER COMMIT THESE
+terraform.tfvars
 .env
+*.env
+
+# Allow example/template files
+!.env.example
+!terraform.tfvars.example
+
+# SSH keys and certificates
+*.pem
+*.key
+id_rsa*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Backup files
+*.backup
+*.bak
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
