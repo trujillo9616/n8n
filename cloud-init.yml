@@ -1,9 +1,7 @@
 #cloud-config
-# cloud-init.yml - N8N Server Initialization
-
 users:
   - name: n8nuser
-    groups: sudo, docker
+    groups: sudo
     shell: /bin/bash
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh_authorized_keys:
@@ -24,41 +22,26 @@ packages:
 package_update: true
 package_upgrade: true
 
-# Write files
 write_files:
-  # Environment file with sensitive data
-  - path: /home/n8nuser/.env
-    owner: n8nuser:n8nuser
+  - path: /tmp/.env
     permissions: '0600'
     content: |
-      # N8N Environment Configuration
-      # This file contains sensitive configuration
-
-      # PostgreSQL Database Configuration
       POSTGRES_DB=n8n
       POSTGRES_USER=postgres
       POSTGRES_PASSWORD=${postgres_password}
       POSTGRES_NON_ROOT_USER=n8n_agent
       POSTGRES_NON_ROOT_PASSWORD=${postgres_password}
-
-      # N8N Authentication
       N8N_BASIC_AUTH_USER=${n8n_basic_auth_user}
       N8N_BASIC_AUTH_PASSWORD=${n8n_basic_auth_password}
-
-      # External Access Configuration
       WEBHOOK_URL=https://${domain_name}/
 
-  # Nginx configuration
   - path: /etc/nginx/sites-available/n8n
     permissions: '0644'
     content: |
       server {
           listen 80;
           server_name ${domain_name};
-          
           client_max_body_size 50M;
-          
-          # Security headers
           add_header X-Frame-Options "SAMEORIGIN" always;
           add_header X-XSS-Protection "1; mode=block" always;
           add_header X-Content-Type-Options "nosniff" always;
@@ -68,25 +51,20 @@ write_files:
           location / {
               proxy_pass http://localhost:5678;
               proxy_http_version 1.1;
-              proxy_set_header Upgrade $$http_upgrade;
+              proxy_set_header Upgrade ${http_upgrade};
               proxy_set_header Connection 'upgrade';
-              proxy_set_header Host $$host;
-              proxy_set_header X-Real-IP $$remote_addr;
-              proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $$scheme;
-              proxy_cache_bypass $$http_upgrade;
-              
-              # Important for n8n webhooks
-              proxy_set_header X-Forwarded-Host $$host;
-              proxy_set_header X-Forwarded-Server $$host;
-              
-              # Timeouts
+              proxy_set_header Host ${host};
+              proxy_set_header X-Real-IP ${remote_addr};
+              proxy_set_header X-Forwarded-For ${proxy_add_x_forwarded_for};
+              proxy_set_header X-Forwarded-Proto ${scheme};
+              proxy_cache_bypass ${http_upgrade};
+              proxy_set_header X-Forwarded-Host ${host};
+              proxy_set_header X-Forwarded-Server ${host};
               proxy_connect_timeout 60s;
               proxy_send_timeout 60s;
               proxy_read_timeout 60s;
           }
           
-          # Health check endpoint
           location /healthz {
               access_log off;
               return 200 "healthy\n";
@@ -94,13 +72,10 @@ write_files:
           }
       }
 
-  # System update script
-  - path: /home/n8nuser/update-system.sh
-    owner: n8nuser:n8nuser
+  - path: /tmp/update-system.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      # System update script
       echo "Updating system packages..."
       sudo apt update && sudo apt upgrade -y
       echo "Updating Docker images..."
@@ -111,97 +86,99 @@ write_files:
       docker system prune -f
       echo "Update complete!"
 
-  # Backup script
-  - path: /home/n8nuser/backup-n8n.sh
-    owner: n8nuser:n8nuser
+  - path: /tmp/backup-n8n.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      # N8N backup script
       BACKUP_DIR="/home/n8nuser/backups"
       DATE=$(date +%Y%m%d_%H%M%S)
-      
       mkdir -p $BACKUP_DIR
-      
       echo "Creating N8N backup..."
       cd /home/n8nuser
-      
-      # Backup database
       docker compose exec postgres pg_dump -U postgres n8n > $BACKUP_DIR/n8n_db_$DATE.sql
-      
-      # Backup n8n data
       docker run --rm -v n8nuser_n8n_data:/data -v $BACKUP_DIR:/backup alpine tar czf /backup/n8n_data_$DATE.tar.gz -C /data .
-      
-      # Keep only last 7 backups
       find $BACKUP_DIR -name "n8n_*" -mtime +7 -delete
-      
       echo "Backup complete: $BACKUP_DIR"
 
 runcmd:
-  # Install Docker
+  # Wait for user creation to complete
+  - sleep 5
+  
+  # Install Docker - Add Docker's official GPG key
   - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  
+  # Add Docker repository
   - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+  # Update package list and install Docker
   - apt-get update
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  
+  # Start and enable Docker service
   - systemctl start docker
   - systemctl enable docker
+  
+  # Add n8nuser to docker group (so they can run docker commands)
   - usermod -aG docker n8nuser
-
-  # Configure Nginx
+  
+  # Create necessary directories for n8nuser
+  - mkdir -p /home/n8nuser/init-scripts
+  - mkdir -p /home/n8nuser/backups
+  
+  # Move files from /tmp to n8nuser home directory and set ownership
+  - mv /tmp/.env /home/n8nuser/.env
+  - mv /tmp/update-system.sh /home/n8nuser/update-system.sh
+  - mv /tmp/backup-n8n.sh /home/n8nuser/backup-n8n.sh
+  - chown -R n8nuser:n8nuser /home/n8nuser
+  
+  # Configure Nginx - Remove default site and enable n8n site
   - rm -f /etc/nginx/sites-enabled/default
   - ln -s /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
+  
+  # Test nginx configuration and restart if valid
   - nginx -t
   - systemctl restart nginx
   - systemctl enable nginx
-
-  # Configure UFW Firewall
+  
+  # Configure UFW firewall
   - ufw --force enable
   - ufw allow ssh
   - ufw allow 'Nginx Full'
   - ufw --force reload
-
-  # Create directories
-  - mkdir -p /home/n8nuser/init-scripts
-  - mkdir -p /home/n8nuser/backups
-  - chown -R n8nuser:n8nuser /home/n8nuser
-
-  # Clone repository to get docker-compose.yml and other files
+  
+  # Clone repository to get docker-compose.yml and other project files
   - cd /home/n8nuser
   - sudo -u n8nuser git clone https://github.com/trujillo9616/n8n.git repo
   - sudo -u n8nuser cp repo/docker-compose.yml .
   - sudo -u n8nuser cp -r repo/init-scripts/* ./init-scripts/ 2>/dev/null || true
   - sudo -u n8nuser rm -rf repo
-
-  # Start N8N services using the repository's docker-compose.yml
+  
+  # Start N8N and database services using Docker Compose
   - cd /home/n8nuser
   - sudo -u n8nuser docker compose up -d
-
-  # Wait for services to be ready
+  
+  # Wait for services to start up
   - sleep 30
-
-  # Install Certbot for SSL
+  
+  # Install Certbot for SSL certificate management
   - apt-get install -y certbot python3-certbot-nginx
-
-  # Setup SSL certificate (if domain is provided and looks like a domain)
+  
+  # Setup SSL certificate if domain is valid
   - |
     if [ "${domain_name}" != "" ] && [[ "${domain_name}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]]; then
       echo "Setting up SSL for ${domain_name}..."
-      # Wait a bit more for DNS propagation and services to be fully ready
       sleep 60
-      # Try to get SSL certificate (may fail if DNS not ready)
       certbot --nginx -d ${domain_name} --non-interactive --agree-tos --email admin@${domain_name} --redirect --quiet || echo "SSL setup failed - DNS may not be ready. Run manually: sudo certbot --nginx -d ${domain_name}"
-      
-      # Setup auto-renewal
       (crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | crontab -
     else
       echo "No valid domain provided, skipping SSL setup"
     fi
-
-  # Setup automatic security updates
+  
+  # Configure automatic security updates
   - echo 'Unattended-Upgrade::Automatic-Reboot "false";' >> /etc/apt/apt.conf.d/50unattended-upgrades
   - dpkg-reconfigure -f noninteractive unattended-upgrades
-
-  # Setup log rotation
+  
+  # Setup log rotation for n8n logs
   - |
     cat > /etc/logrotate.d/n8n << EOF
     /home/n8nuser/*.log {
@@ -216,32 +193,17 @@ runcmd:
     EOF
 
 final_message: |
-  🎉 N8N server setup complete!
+  N8N server setup complete!
   
   Server Information:
-  ==================
-  %{ if domain_name != "" && length(regexall("^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$", domain_name)) > 0 ~}
-  🌐 URL: https://${domain_name}
-  📝 Note: Add DNS A record at Namecheap: n8n -> server_ip
-  %{ else ~}
-  🌐 URL: http://${domain_name}
-  %{ endif ~}
+  URL: https://${domain_name}
+  Username: ${n8n_basic_auth_user}
+  Password: ${n8n_basic_auth_password}
   
-  Credentials:
-  ============
-  👤 Username: ${n8n_basic_auth_user}
-  🔑 Password: ${n8n_basic_auth_password}
-  
-  SSH Access:
-  ===========
-  🔐 ssh n8nuser@${domain_name}
+  SSH Access: ssh n8nuser@${domain_name}
   
   Management Commands:
-  ===================
-  📊 Check services: docker compose ps
-  📋 View logs: docker compose logs -f n8n
-  🔄 Update system: ./update-system.sh
-  💾 Backup data: ./backup-n8n.sh
-  
-  🔒 SSL certificate will be automatically obtained once DNS is configured.
-  ⚡ If SSL setup failed, run manually: sudo certbot --nginx -d ${domain_name}
+  Check services: docker compose ps
+  View logs: docker compose logs -f n8n
+  Update system: ./update-system.sh
+  Backup data: ./backup-n8n.sh

@@ -1,4 +1,3 @@
-# .github/workflows/deploy-n8n.yml
 name: Deploy N8N Infrastructure
 
 on:
@@ -6,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
   workflow_dispatch:
     inputs:
       action:
@@ -14,44 +14,55 @@ on:
         default: 'plan'
         type: choice
         options:
-        - plan
-        - apply
-        - destroy
+          - plan
+          - apply
+          - destroy
+      
       confirm_destroy:
-        description: 'Type "destroy" to confirm destruction (owner only)'
+        description: 'Type "destroy" to confirm destruction (repo owner only)'
         required: false
         type: string
-
-env:
-  TF_VERSION: "1.5.0"
-  
-  # DigitalOcean API for resource management
-  TF_VAR_do_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
-  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-  TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
-  TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
-  TF_VAR_n8n_basic_auth_user: ${{ secrets.N8N_BASIC_AUTH_USER }}
-  TF_VAR_n8n_basic_auth_password: ${{ secrets.N8N_BASIC_AUTH_PASSWORD }}
-  TF_VAR_droplet_size: ${{ vars.DROPLET_SIZE || 's-1vcpu-512mb' }}
-  TF_VAR_region: ${{ vars.REGION || 'sfo3' }}
-  
-  # DigitalOcean Spaces credentials for state backend
-  AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
 
 jobs:
   terraform:
     name: 'Terraform ${{ github.event.inputs.action }}'
     runs-on: ubuntu-latest
     
-    # Prevent multiple simultaneous deployments
+    # Prevents concurrent runs of this job
     concurrency:
       group: terraform-deploy
       cancel-in-progress: false
 
+    # Permissions for the job
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+
+    - name: Check for skip deploy tag
+      id: skip_check
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "${{ github.event.pull_request.title }}" == *"[skip deploy]"* ]]; then
+            echo "skip=true" >> $GITHUB_ENV
+            echo "🚫 Deploy skipped due to skip tag in PR title"
+          else
+            echo "skip=false" >> $GITHUB_ENV
+            echo "✅ Deploy will proceed"
+          fi
+        else
+          if git log -1 --pretty=%B | grep -q "\[skip deploy\]"; then
+            echo "skip=true" >> $GITHUB_ENV
+            echo "🚫 Deploy skipped due to skip tag in commit message"
+          else
+            echo "skip=false" >> $GITHUB_ENV
+            echo "✅ Deploy will proceed"
+          fi
+        fi
 
     - name: Validate Destroy Confirmation
       if: github.event.inputs.action == 'destroy'
@@ -61,84 +72,54 @@ jobs:
           echo "❌ Destroy confirmation failed. You must type 'destroy' to confirm."
           exit 1
         fi
-        
-        # Check 2: Only repository owner can destroy
+
+        # Check 2: Only allow repo owner to run destroy
         if [ "${{ github.actor }}" != "${{ github.repository_owner }}" ]; then
-          echo "❌ Only the repository owner can destroy infrastructure."
-          echo "Current user: ${{ github.actor }}"
-          echo "Repository owner: ${{ github.repository_owner }}"
+          echo "❌ Only the repository owner can run destroy."
           exit 1
         fi
-        
-        echo "✅ All destroy confirmations validated"
+
+        # If both checks pass, proceed with destruction giving slight delay for safety
+        echo "✅ Destroy confirmation passed."
         echo "🚨 Proceeding with infrastructure destruction in 10 seconds..."
         sleep 10
-
+  
     - name: Setup Terraform
+      if: env.skip != 'true'
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: ${{ env.TF_VERSION }}
-
-    - name: Verify Environment Variables
-      run: |
-        echo "🔍 Verifying required environment variables..."
-        
-        # Check Terraform variables
-        required_tf_vars=(
-          "TF_VAR_do_token"
-          "TF_VAR_ssh_public_key" 
-          "TF_VAR_domain_name"
-          "TF_VAR_postgres_password"
-          "TF_VAR_n8n_basic_auth_user"
-          "TF_VAR_n8n_basic_auth_password"
-        )
-        
-        # Check Spaces credentials
-        required_spaces_vars=(
-          "AWS_ACCESS_KEY_ID"
-          "AWS_SECRET_ACCESS_KEY"
-        )
-        
-        for var in "${required_tf_vars[@]}" "${required_spaces_vars[@]}"; do
-          if [ -z "${!var}" ]; then
-            echo "❌ Missing required variable: $var"
-            exit 1
-          else
-            echo "✅ $var is set"
-          fi
-        done
-        
-        echo "🎉 All required variables verified!"
+        terraform_version: 1.5.0
 
     - name: Terraform Format Check
+      if: env.skip != 'true'
       run: terraform fmt -check
-      continue-on-error: true
 
     - name: Terraform Init
-      run: |
-        terraform init
-        echo "✅ Terraform initialized with DigitalOcean Spaces backend"
+      if: env.skip != 'true'
+      run: terraform init
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
 
     - name: Terraform Validate
+      if: env.skip != 'true'
       run: terraform validate
 
     - name: Terraform Plan
-      id: plan
-      run: |
-        if [ "${{ github.event.inputs.action }}" == "destroy" ]; then
-          terraform plan -destroy -no-color -out=tfplan
-          echo "📋 Destroy plan generated"
-        else
-          terraform plan -no-color -out=tfplan
-          echo "📋 Apply plan generated"
-        fi
-        echo "✅ Terraform plan completed successfully"
-        echo "🌊 State managed via DigitalOcean Spaces"
+      if: env.skip != 'true'
+      run: terraform plan -no-color
       env:
-        TF_IN_AUTOMATION: true
+        TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+        TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+        TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
+        TF_VAR_n8n_basic_auth_user: ${{ vars.N8N_BASIC_AUTH_USER }}
+        TF_VAR_n8n_basic_auth_password: ${{ secrets.N8N_BASIC_AUTH_PASSWORD }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
 
     - name: Comment PR with Plan Status
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && env.skip != 'true'
       uses: actions/github-script@v7
       with:
         script: |
@@ -160,160 +141,80 @@ jobs:
             body: output
           })
 
-    - name: Terraform Apply
-      if: |
-        (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
-      run: |
-        terraform apply -auto-approve tfplan
-        echo "✅ Infrastructure deployed successfully"
-        echo "🌊 State saved to DigitalOcean Spaces"
-      env:
-        TF_IN_AUTOMATION: true
-
-    - name: Terraform Destroy
-      if: github.event.inputs.action == 'destroy'
-      run: |
-        terraform apply -auto-approve tfplan  # Apply the destroy plan
-        echo "✅ Infrastructure destroyed successfully"
-        echo "🌊 State updated in DigitalOcean Spaces"
-      env:
-        TF_IN_AUTOMATION: true
-
-    - name: Save Deployment Info to Artifact
-      if: |
-        (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
-      run: |
-        # Create deployment info file for debugging
-        echo "=== N8N Deployment Information ===" > deployment-info.txt
-        echo "Deployment Date: $(date -u)" >> deployment-info.txt
-        echo "Git Commit: ${{ github.sha }}" >> deployment-info.txt
-        echo "Triggered by: ${{ github.actor }}" >> deployment-info.txt
-        echo "Event: ${{ github.event_name }}" >> deployment-info.txt
-        echo "State Backend: DigitalOcean Spaces" >> deployment-info.txt
-        echo "State Bucket: truji" >> deployment-info.txt
-        echo "" >> deployment-info.txt
-        
-        # Add Terraform outputs (only if apply was successful)
-        if terraform output server_ip > /dev/null 2>&1; then
-          echo "=== Server Information ===" >> deployment-info.txt
-          echo "Server IP: $(terraform output -raw server_ip)" >> deployment-info.txt
-          echo "Server URL: $(terraform output -raw server_url)" >> deployment-info.txt
-          echo "SSH Command: $(terraform output -raw ssh_command)" >> deployment-info.txt
-          # Add DNS information
-          echo "=== DNS Management ===" >> deployment-info.txt
-          echo "DNS Provider: DigitalOcean (automated)" >> deployment-info.txt
-          echo "Domain Zone: truji.dev" >> deployment-info.txt
-          echo "N8N URL: https://n8n.truji.dev" >> deployment-info.txt
-          echo "Root Domain: https://truji.dev" >> deployment-info.txt
-          echo "WWW Domain: https://www.truji.dev" >> deployment-info.txt
-          echo "" >> deployment-info.txt
-          echo "Required Nameserver Update at Namecheap:" >> deployment-info.txt
-          echo "- ns1.digitalocean.com" >> deployment-info.txt
-          echo "- ns2.digitalocean.com" >> deployment-info.txt
-          echo "- ns3.digitalocean.com" >> deployment-info.txt
-          echo "" >> deployment-info.txt
-          
-          # Add infrastructure details
-          echo "=== Infrastructure Details ===" >> deployment-info.txt
-          echo "Droplet Size: ${{ env.TF_VAR_droplet_size }}" >> deployment-info.txt
-          echo "Region: ${{ env.TF_VAR_region }}" >> deployment-info.txt
-          echo "Domain: ${{ env.TF_VAR_domain_name }}" >> deployment-info.txt
-          echo "" >> deployment-info.txt
-          
-          # Add debugging commands
-          echo "=== Debugging Commands ===" >> deployment-info.txt
-          echo "Monitor cloud-init: ssh n8nuser@$(terraform output -raw server_ip) 'sudo tail -f /var/log/cloud-init-output.log'" >> deployment-info.txt
-          echo "Check N8N logs: ssh n8nuser@$(terraform output -raw server_ip) 'docker compose logs -f n8n'" >> deployment-info.txt
-          echo "Check services: ssh n8nuser@$(terraform output -raw server_ip) 'docker compose ps'" >> deployment-info.txt
-          echo "Server status: ssh n8nuser@$(terraform output -raw server_ip) 'systemctl status nginx docker'" >> deployment-info.txt
-          echo "" >> deployment-info.txt
-          
-          # Add security info
-          echo "=== Security Information ===" >> deployment-info.txt
-          echo "Firewall status: ssh n8nuser@$(terraform output -raw server_ip) 'sudo ufw status'" >> deployment-info.txt
-          echo "SSL certificate: ssh n8nuser@$(terraform output -raw server_ip) 'sudo certbot certificates'" >> deployment-info.txt
-          echo "" >> deployment-info.txt
-          
-          # Add state information
-          echo "=== State Management ===" >> deployment-info.txt
-          echo "Backend: DigitalOcean Spaces (S3-compatible)" >> deployment-info.txt
-          echo "Bucket: truji" >> deployment-info.txt
-          echo "Region: ${{ env.TF_VAR_region }}" >> deployment-info.txt
-          echo "Versioning: Enabled" >> deployment-info.txt
-          
-          # Add Spaces bucket info if available
-          if terraform output state_bucket_info > /dev/null 2>&1; then
-            echo "Spaces Endpoint: $(terraform output -json state_bucket_info | jq -r '.endpoint')" >> deployment-info.txt
-          fi
-        else
-          echo "=== Server Information ===" >> deployment-info.txt
-          echo "No server outputs available (deployment may have failed)" >> deployment-info.txt
-        fi
-        
-        echo "📄 Deployment info saved to artifact for debugging"
-
-    - name: Output Deployment Status
-      if: |
-        (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
-      run: |
-        echo "## 🚀 N8N Deployment Complete!" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### ✅ Deployment Status" >> $GITHUB_STEP_SUMMARY
-        echo "- Infrastructure deployed successfully" >> $GITHUB_STEP_SUMMARY
-        echo "- N8N server is being configured (3-5 minutes)" >> $GITHUB_STEP_SUMMARY
-        echo "- SSL certificate will be automatically requested" >> $GITHUB_STEP_SUMMARY
-        echo "- State managed via DigitalOcean Spaces" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🌊 DigitalOcean Integration" >> $GITHUB_STEP_SUMMARY
-        echo "- **Compute:** Droplet in ${{ env.TF_VAR_region }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Storage:** Spaces bucket (truji) for state management" >> $GITHUB_STEP_SUMMARY
-        echo "- **Networking:** Firewall and load balancing" >> $GITHUB_STEP_SUMMARY
-        echo "- **All in one ecosystem:** Unified billing and management" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔐 Security Information" >> $GITHUB_STEP_SUMMARY
-        echo "- Server details available in deployment artifacts" >> $GITHUB_STEP_SUMMARY
-        echo "- Terraform state stored securely in DigitalOcean Spaces" >> $GITHUB_STEP_SUMMARY
-        echo "- State versioning enabled for rollback capability" >> $GITHUB_STEP_SUMMARY
-        echo "- Login credentials stored securely in repository secrets" >> $GITHUB_STEP_SUMMARY
-        echo "- SSH access requires your private key" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🌐 DNS Configuration" >> $GITHUB_STEP_SUMMARY
-        echo "**Automated DNS Management:** DigitalOcean handles all DNS records" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
-        echo "1. **Update nameservers at Namecheap:**" >> $GITHUB_STEP_SUMMARY
-        echo "   - Go to Namecheap → Domain List → Manage truji.dev" >> $GITHUB_STEP_SUMMARY
-        echo "   - Nameservers section → Custom DNS" >> $GITHUB_STEP_SUMMARY
-        echo "   - Add: \`ns1.digitalocean.com\`, \`ns2.digitalocean.com\`, \`ns3.digitalocean.com\`" >> $GITHUB_STEP_SUMMARY
-        echo "2. **Wait for nameserver propagation** (24-48 hours, usually faster)" >> $GITHUB_STEP_SUMMARY
-        echo "3. **DNS records automatically created:**" >> $GITHUB_STEP_SUMMARY
-        echo "   - \`n8n.truji.dev\` → Server IP (for N8N access)" >> $GITHUB_STEP_SUMMARY
-        echo "   - \`truji.dev\` → Server IP (root domain)" >> $GITHUB_STEP_SUMMARY
-        echo "   - \`www.truji.dev\` → CNAME to root" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🛡️ State Management" >> $GITHUB_STEP_SUMMARY
-        echo "- **Backend:** DigitalOcean Spaces (S3-compatible)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Bucket:** truji (your existing Spaces bucket)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Versioning:** Enabled with automatic cleanup" >> $GITHUB_STEP_SUMMARY
-        echo "- **Persistence:** Future runs will update existing infrastructure" >> $GITHUB_STEP_SUMMARY
-        echo "- **No recreation:** Resources will be modified, not destroyed/recreated" >> $GITHUB_STEP_SUMMARY
-
-    - name: Upload Deployment Artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
+    - name: Comment PR with Skip Notice
+      if: github.event_name == 'pull_request' && env.skip == 'true'
+      uses: actions/github-script@v7
       with:
-        name: deployment-info-${{ github.sha }}
-        path: |
-          deployment-info.txt
-          *.log
-        retention-days: 30
-        if-no-files-found: ignore
+        script: |
+          const output = `## 🚫 Deploy Skipped
+          
+          Deploy was skipped due to \`[skip deploy]\` tag in PR title.
+          
+          **PR title:** ${{ github.event.pull_request.title }}
+          
+          *The infrastructure code was not validated due to skip tag.*`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
 
-    - name: Security Cleanup
+    # Auto-apply on main branch push (if not skipped)
+    - name: Terraform Apply (Auto)
+      if: env.skip != 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: terraform apply -auto-approve
+      env:
+        TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+        TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+        TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
+        TF_VAR_n8n_basic_auth_user: ${{ vars.N8N_BASIC_AUTH_USER }}
+        TF_VAR_n8n_basic_auth_password: ${{ secrets.N8N_BASIC_AUTH_PASSWORD }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
+
+    # Manual apply via workflow_dispatch
+    - name: Terraform Apply (Manual)
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+      run: terraform apply -auto-approve
+      env:
+        TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+        TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+        TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
+        TF_VAR_n8n_basic_auth_user: ${{ vars.N8N_BASIC_AUTH_USER }}
+        TF_VAR_n8n_basic_auth_password: ${{ secrets.N8N_BASIC_AUTH_PASSWORD }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
+
+    # Manual destroy via workflow_dispatch
+    - name: Terraform Destroy (Manual)
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+      run: terraform destroy -auto-approve
+      env:
+        TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+        TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+        TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
+        TF_VAR_n8n_basic_auth_user: ${{ vars.N8N_BASIC_AUTH_USER }}
+        TF_VAR_n8n_basic_auth_password: ${{ secrets.N8N_BASIC_AUTH_PASSWORD }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
+
+    - name: Deploy Summary
       if: always()
       run: |
-        rm -f tfplan *.pem *.key
-        echo "🧹 Security cleanup completed (artifacts preserved)"
+        echo "## 📊 Workflow Summary" >> $GITHUB_STEP_SUMMARY
+        echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Actor:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "**Manual Action:** ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ "${{ env.skip }}" == "true" ]; then
+          echo "**Status:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**Status:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+        fi
