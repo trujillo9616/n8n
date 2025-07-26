@@ -3,18 +3,18 @@
 terraform {
   backend "s3" {
     # DigitalOcean Spaces configuration
-    endpoint                    = "https://sfo3.digitaloceanspaces.com"
-    bucket                     = "truji"
-    key                        = "n8n-infrastructure/terraform.tfstate"
-    region                     = "us-east-1"  # Required but ignored by DO Spaces
-    
+    endpoint = "https://sfo3.digitaloceanspaces.com"
+    bucket   = "truji"
+    key      = "n8n-infrastructure/terraform.tfstate"
+    region   = "us-east-1" # Required but ignored by DO Spaces
+
     # DigitalOcean Spaces specific settings
     skip_credentials_validation = true
     skip_metadata_api_check     = true
     skip_region_validation      = true
-    force_path_style           = false
+    force_path_style            = false
   }
-  
+
   required_providers {
     digitalocean = {
       source  = "digitalocean/digitalocean"
@@ -99,10 +99,10 @@ resource "digitalocean_droplet" "n8n_server" {
 
   user_data = templatefile("${path.module}/cloud-init.yml", {
     postgres_password       = var.postgres_password
-    n8n_basic_auth_user    = var.n8n_basic_auth_user
+    n8n_basic_auth_user     = var.n8n_basic_auth_user
     n8n_basic_auth_password = var.n8n_basic_auth_password
-    domain_name            = var.domain_name
-    ssh_public_key         = var.ssh_public_key
+    domain_name             = var.domain_name
+    ssh_public_key          = var.ssh_public_key
   })
 
   tags = ["n8n", "automation", "terraform"]
@@ -212,14 +212,14 @@ output "basic_auth_credentials" {
 
 output "dns_instructions" {
   description = "DNS setup instructions"
-  value = "Update nameservers at Namecheap to use DigitalOcean DNS"
+  value       = "Update nameservers at Namecheap to use DigitalOcean DNS"
 }
 
 output "digitalocean_nameservers" {
   description = "DigitalOcean nameservers to configure at Namecheap"
   value = [
     "ns1.digitalocean.com",
-    "ns2.digitalocean.com", 
+    "ns2.digitalocean.com",
     "ns3.digitalocean.com"
   ]
 }
